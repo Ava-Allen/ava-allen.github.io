@@ -1,5 +1,5 @@
 # MBA Candidate & Business Analytics Graduate
-### Teaching & Graduate Assistant
+
 ### Technical Skills: Python, R SQL, Excel, Tableau
 ### Resume: [view here](https://github.com/Ava-Allen/ava-allen.github.io/blob/main/Ava%20Allen%20-%20Resume%202025-2026.pdf)
 ### Contact: allenava2021@gmail.com
