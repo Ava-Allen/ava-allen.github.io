@@ -1,0 +1,661 @@
+---
+title: "Pilot Project"
+author: "Ava Allen, Svetlana Doronkina, Allison English, and Otto Jeckerbyrne"
+date: "April 9, 2025"
+output: 
+  powerpoint_presentation:
+---
+
+# **What Drives Home Value at Different Price Points:**
+
+## A quantile regression approach to modeling hedonic attributes {.tabset}
+
+### Introduction
+
+**Goal:** Use quantile regression modeling, with a focus on size-related variables to measure the relationship between hedonic characteristics and house prices across different price levels in real estate analysis.
+
+Hedonic characteristics include physical attributes (e.g. size, age, number of bedrooms and bathrooms), location characteristics (e.g. proximity to schools and public transport), neighborhood attributes (e.g. safety and aesthetic appeal), and environmental factors (e.g. scenic view, climate, air quality).
+
+For this study, quantile regression is applied to housing data from Ames, Iowa, to develop a hedonic house price model and examine the impact of various hedonic attributes on house prices at different levels.
+
+**Traditional Hedonic Pricing Model**
+
+$$
+P = f(H_i, N_i,⍺,β)
+$$
+
+Where:
+
+$P_i$ is the sale price of house *i*
+
+$H_i$ is a vector of physical housing attributes associated with a house
+
+$N_i$ is a vector of neighborhood and accessibility variables
+
+α and β are the estimated parameters associated with the exogenous variable
+
+### Literature Review: Past Studies & Limitations
+
+Quantile regression model introduced in 1978 by Koenker & Basset as a more flexible approach to modeling house prices at different levels. The model explains the determinants of the dependent variable at any point on the distribution of the dependent variable.
+
+In 2011, Ebru and Eban examined house prices in Istanbul using quantile regression and discovered that age, cable TV, heating system, garage, security, kitchen area, and number of rooms tend to increase house prices variably across different regions. In 2005, Lee, Chung, and Kim compared the differentiated effects of building age on house prices. This comparison showed apartment prices decreased until the buildings were 15-19 years and then began to rise again due to the prospect of redevelopment. Their article also highlights the limitations of using house price data projected from real estate agents instead of using real-transaction data.
+
+The Kim et. al (2015) article notes on limitations associated with using data other than real-transaction data, such as court auction data. Kang and Liu (2014) implement quantile regression to investigate the impact that the 2008 financial crisis had on house prices in China and Taiwan. Interestingly, it was found that higher priced real estate was more affected by the financial crisis in Taiwan, while the opposite was true in China. The article by Kim et al. reaffirms the idea that buyers’ preferences for certain features differ across price ranges. They found that proximity to metro stations and high schools is more significant for lower price quantiles, while scenic views have a larger positive impact on higher-priced homes. When discussing the varying results in the relationship between house prices and hedonic characteristics, the article lists potential reasons behind this variability. These reasons include the fact that each result is specific to its individual market of study, and that housing attributes vary in significance across different points on the conditional distribution of house prices.
+
+### Data {.tabset}
+
+For this study, we're using data from Ames, Iowa, collected by the Ames Accessor's Office regarding residential properties that were sold between 2006-2010
+
+![Image 1. Ames, Iowa](images/clipboard-2235167684.png)
+
+Ames is a Story County in central Iowa and is home of Iowa State University (ISU). The presence of the college has a large effect on the city's economy, culture, and demographics. This comes with an abundance of student housing, particularly in College Creek and South & West of Iowa State University.
+
+The city also contains:
+
+Upper-class suburban neighborhoods: Northridge Heights & Stone Brook
+
+Lower-class areas: Meadow Village and Briardale
+
+The smaller homes in Ames tend to be older and located in more affordable neighborhoods. Large luxury homes in Ames often exceed 3,000 square feet with 4-5 bedrooms, larger yards, and upscale finishes. This city has seen a growth in population over recent years and in turn an increase in housing market activity.
+
+### Methodology {.tabset}
+
+#### Data Preprocessing {.tabset}
+
+##### Exploration
+
+Loading the necessary libraries
+
+```{r setup, results = "hide", message = FALSE, warning=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(corrplot)
+library(caret)
+library(car)
+library(scales)
+library(quantreg)
+library(cluster)
+library(readxl)
+library(dplyr)
+```
+
+Loading the dataset
+
+```{r}
+df <- read.csv("train.csv")
+```
+
+```{r}
+# Checking out the structure & summary
+str(df)
+summary(df)
+```
+
+##### Descriptive Statistics - Comparison by Neighborhood
+
+![Table 1. Descriptive Statistics](images/clipboard-1467270948.png)Northridge Heights has the highest median price - \$315,000 Meadow Village has the lowest median price - \$88,000
+
+Northridge has the highest sale price - \$335,295 (Followed closely by Stone Brook & Northridge Heights)
+
+Northridge also has the greatest average house size ("size" refers to the total interior living area) - 5,017 sq.ft
+
+Additionally, the age of homes with higher median prices is relatively low when compared to other homes. Looking at lower priced homes, we see that size is lower while age increases. From these descriptive statistics, we can ascertain that house size and age are inversely related for higher priced homes.
+
+Neighborhoods such as College Creek and South & West of Iowa State University contain an abundance of college housing. These neighborhoods fall under the upper-middle and lower-middle range of average house prices and have higher average sizes, presumably to accommodate for multiple students.
+
+##### Feature Selection
+
+Creating derived variables for age of home and time since remodel
+
+```{r}
+df$Age <- df$YrSold - df$YearBuilt
+df$YearsSinceRemodel <- df$YrSold - df$YearRemodAdd
+```
+
+Selecting the target variable and relevent predictors for our analysis
+
+```{r}
+selected_vars <- c(
+  "MSSubClass", "MSZoning", "LotFrontage", "LotShape", "LandContour", 
+  "LotConfig", "Neighborhood", "Condition1", "BldgType", "HouseStyle", 
+  "OverallQual", "YearBuilt", "YearRemodAdd", "Foundation", "X1stFlrSF", 
+  "X2ndFlrSF", "LowQualFinSF", "FullBath", "HalfBath", "BedroomAbvGr", 
+  "KitchenAbvGr", "TotRmsAbvGrd", "Fireplaces", "GarageType", "GarageCars",
+  "GarageArea", "WoodDeckSF", "OpenPorchSF", "SalePrice", "Age", "YearsSinceRemodel")
+
+# Subset the df to selected variables only
+df <- df[, selected_vars] 
+```
+
+##### Handling Missing Values
+
+```{r}
+# Check for missing values
+colSums(is.na(df))
+```
+
+```{r}
+# Replace missing LotFrontage with median
+df$LotFrontage[is.na(df$LotFrontage)] <- median(df$LotFrontage, na.rm = TRUE)
+
+# Remove rows with missing values in GarageType
+df <- df[!is.na(df$GarageType), ]
+
+# Check that missing values are removed
+colSums(is.na(df))
+```
+
+##### Factor Conversion
+
+```{r}
+# Subset our selected categorical variables 
+categorical_vars <- c(
+  "MSSubClass", "MSZoning", "LotShape", "LandContour", 
+  "LotConfig", "Neighborhood", "Condition1", "BldgType", 
+  "HouseStyle", "Foundation", "GarageType")
+
+# Convert categorical variables to factor
+df[categorical_vars] <- lapply(df[categorical_vars], as.factor)
+
+# Check structure again
+str(df)
+```
+
+**Getting only numerical values (excluding SalesPrice)**
+
+```{r}
+numeric_vars <- df %>%
+  select(where(is.numeric)) %>%
+  select(-SalePrice) %>%
+  names()
+numeric_vars
+length(numeric_vars)
+```
+
+##### Handling Outliers
+
+**Outlier Detection via Boxplot**
+
+```{r}
+visualize_boxplots <- function(vars, df, start_idx, end_idx) {
+  par(mfrow=c(2,5), oma=c(3,3,3,3), mar=c(2,2,2,2))  
+  
+  for (col in vars[start_idx:end_idx]) {
+    boxplot(df[[col]], main=col, col="lightblue", outline=TRUE)
+  }
+}
+```
+
+**Visualizing the outliers of our numerical variables**
+
+```{r}
+visualize_boxplots(numeric_vars, df, 1, 19)
+```
+
+**Outlier detection via IQR**
+
+```{r}
+detect_outliers <- function(data, column) {
+  Q1 <- quantile(data[[column]], 0.25, na.rm = TRUE)
+  Q3 <- quantile(data[[column]], 0.75, na.rm = TRUE)
+  IQR_value <- Q3 - Q1
+  
+  # Define outlier bounds
+  lower_bound <- Q1 - 1.5 * IQR_value
+  upper_bound <- Q3 + 1.5 * IQR_value
+  
+  # Count number of outliers
+  num_outliers <- sum(data[[column]] < lower_bound | data[[column]] > upper_bound, na.rm = TRUE)
+  return(num_outliers)
+}
+```
+
+```{r}
+# Review outliers per variable
+sapply(numeric_vars, function(col) detect_outliers(df, col))
+```
+
+**Variables that should NOT be adjusted**
+
+These outliers, while statistically extreme, are plausible and reflect real variation in home features
+
+```{r}
+# YearBuilt - Extreme distribution reflects historical or very new properties (very meaningful) 
+boxplot.stats(df$YearBuilt)$out
+
+# X2ndFlrSF - 2 outliers (1872 and 2065 sq.ft); plausible in high-end or custom homes
+boxplot.stats(df$X2ndFlrSF)$out
+
+# LowQualFinSF - Larger low-quality finished areas may indicate basements or poorly finished additions.
+boxplot.stats(df$LowQualFinSF)$out
+
+# BedroomAbvGr - While 0 bedrooms seems odd, it can reflect studio layouts; 5–6 is realistic in large homes.
+boxplot.stats(df$BedroomAbvGr)$out
+
+# KitchenAbvGr - 2 or 3 kitchens is unusual, but plausible
+boxplot.stats(df$KitchenAbvGr)$out
+
+# TotRmsAbvGrd - Larger homes often have many rooms; 11+ isn't surprising for luxury homes.
+boxplot.stats(df$TotRmsAbvGrd)$out
+
+# Fireplaces - 3 fireplaces is pretty uncommon, but plausible in large or older homes.
+boxplot.stats(df$Fireplaces)$out
+
+# GarageCars - Four-car garages are realistic for high-value homes or properties with workshops.
+boxplot.stats(df$GarageCars)$out
+
+# GarageArea - Large garages reflect 3-4 car capacity and possible additional storage or workshop space.
+boxplot.stats(df$GarageArea)$out
+
+# WoodDeckSF - Extensive decking (large patios, wrap-arounds) makes sense in some large properties.
+boxplot.stats(df$WoodDeckSF)$out
+
+# OpenPorchSF - Large porches are common in older or custom homes; these values are left unchanged.
+boxplot.stats(df$OpenPorchSF)$out
+```
+
+Although these variables contain statistical outliers, they reflect valid real-world values and do not appear to be data entry errors. For example, homes with four-car garages or multiple fireplaces are rare but entirely plausible in the context of high-end properties, so we chose to retain them for analysis.
+
+**Variables that SHOULD be adjusted**
+
+```{r}
+# LotFrontage has 1 extreme outlier that should be removed; the rest make sense for larger, more expensive homes
+lf_outlier_values <- boxplot.stats(df$LotFrontage)$out
+extreme_lf <- lf_outlier_values[lf_outlier_values > 200] 
+df <- df[!(df$LotFrontage %in% extreme_lf), ]
+
+# X1stFlrSF has 2 extreme outliers that should be removed; the rest make sense for larger, more expensive homes
+sf_outlier_values <- boxplot.stats(df$X1stFlrSF)$out
+extreme_sf <- lf_outlier_values[lf_outlier_values > 3000] 
+df <- df[!(df$X1stFlrSF %in% extreme_sf), ]
+```
+
+##### Feature Engineering
+
+**Define Interaction Terms (captures complex relationships between variables)**
+
+```{r}
+df$Flr_Interaction <- df$X1stFlrSF * df$X2ndFlrSF 
+# captures architectural layout (ranch vs. 2-story homes) 
+# homes with lg. 1st and 2nd floors are structurally different from single-level homes.
+
+df$Room_Interaction <- df$TotRmsAbvGrd * df$BedroomAbvGr 
+# Compares private vs. shared space in total room count
+# A higher ratio of bedrooms to total rooms may reflect more compact layouts
+
+df$Bath_Interaction <- df$FullBath * df$HalfBath
+# Total bathroom count can reflect complexity or luxury level of a home
+# Homes with both types of bathrooms may be larger or more segmented
+
+df$Garage_Interaction <- df$GarageCars * as.numeric(factor(df$GarageType))
+# Size & structure of garage may hint at overall house design
+# Attached garages may scale differently with car capacity than detached ones
+
+df$Remodel_Interaction <- df$YearBuilt * df$YearRemodAdd
+# Distinguishes homes that have been expanded or modernized
+# Older homes with recent remodels may resemble newer builds in size/layout
+
+# Confirm the new features have been added
+str(df[, c("Flr_Interaction", "Room_Interaction", "Bath_Interaction", "Garage_Interaction", "Remodel_Interaction")])
+```
+
+**Neighborhood Cluster Feature Creation**
+
+```{r}
+# Load neighborhood ratings from Excel
+neighborhood_scores <- read_excel("neighborhood_ratings.xlsx")
+```
+
+```{r}
+# Convert letter grades to numeric GPA-style scores
+grades <- c(
+  "A+" = 4.3, "A" = 4.0, "A-" = 3.7,
+  "B+" = 3.3, "B" = 3.0, "B-" = 2.7,
+  "C+" = 2.3, "C" = 2.0, "C-" = 1.7,
+  "D+" = 1.3, "D" = 1.0, "D-" = 0.7,
+  "F" = 0.0)
+
+score_cols <- names(neighborhood_scores)[-1]  # Exclude town name column
+for (col in score_cols) {
+  neighborhood_scores[[col]] <- grades[neighborhood_scores[[col]]]
+}
+```
+
+**K-means clustering to neighborhood scores**
+
+```{r}
+set.seed(1)
+scores_matrix <- scale(neighborhood_scores[, score_cols])
+kmeans_result <- kmeans(scores_matrix, centers = 3)
+
+neighborhood_scores$NeighborhoodCluster <- as.factor(kmeans_result$cluster)
+neighborhood_scores$Neighborhood <- neighborhood_scores$Town # For joining
+
+# Merge clusters into main dataset
+df <- df %>%
+  left_join(neighborhood_scores %>% select(Neighborhood, NeighborhoodCluster), by = "Neighborhood")
+```
+
+**Collapse & Reformat Categorical Variables**
+
+```{r}
+# Collapse HouseStyle into simplified groups: 1Story vs 2Story
+df <- df %>%
+  mutate(HouseStyleCollapsed = case_when(
+    HouseStyle %in% c("1Story", "1.5Fin", "1.5Unf", "SFoyer", "SLvl") ~ "1Story",
+    HouseStyle %in% c("2Story", "2.5Fin", "2.5Unf") ~ "2Story",
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(HouseStyleCollapsed = factor(HouseStyleCollapsed),
+         NeighborhoodCluster = factor(NeighborhoodCluster))
+
+# Explicitly convert other categorical variables to factors
+df$MSSubClass <- factor(df$MSSubClass)
+df$Neighborhood <- factor(df$Neighborhood)
+df$HouseStyle <- factor(df$HouseStyle)
+df$MSZoning <- factor(df$MSZoning)
+```
+
+#### Modeling: Quantile Regression {.tabset .tabset-pills}
+
+We’ll model different quantiles (25th, 50th, and 75th percentiles) of housing prices to explore how relationships between predictors and price change across the distribution
+
+##### Model 1: Full model with main effects + numeric interaction terms
+
+$$
+\begin{align*}
+\text{Sale Price}_{\tau} = \ & \beta_0 + \beta_1 \text{LotFrontage} + \beta_2 \text{OverallQual} + \beta_3 \text{YearBuilt} + \beta_4 \text{YearRemodAdd} \\
+& + \beta_5 \text{X1stFlrSF} + \beta_6 \text{X2ndFlrSF} + \beta_7 \text{LowQualFinSF} + \beta_8 \text{FullBath} + \beta_9 \text{HalfBath} \\
+& + \beta_{10} \text{BedroomAbvGr} + \beta_{11} \text{KitchenAbvGr} + \beta_{12} \text{TotRmsAbvGrd} + \beta_{13} \text{Fireplaces} \\
+& + \beta_{14} \text{GarageArea} + \beta_{15} \text{WoodDeckSF} + \beta_{16} \text{OpenPorchSF} \\
+& + \gamma_1 \text{Flr_Interaction} + \gamma_2 \text{Room_Interaction} + \gamma_3 \text{Bath_Interaction} \\
+& + \gamma_4 \text{Garage_Interaction} + \gamma_5 \text{Remodel_Interaction} + \epsilon_{\tau}
+\end{align*}
+$$
+
+```{r, Warning=FALSE}
+quantiles <- c(0.25, 0.50, 0.75)
+
+reg_equation <- SalePrice ~ 
+  # Main effects 
+  LotFrontage + OverallQual + YearBuilt + YearRemodAdd +
+  X1stFlrSF + X2ndFlrSF + LowQualFinSF + FullBath + HalfBath + 
+  BedroomAbvGr + KitchenAbvGr + TotRmsAbvGrd + Fireplaces + 
+  GarageArea + WoodDeckSF + OpenPorchSF +
+  
+  # Numeric interaction terms
+  Flr_Interaction + Room_Interaction + Bath_Interaction +
+  Garage_Interaction + Remodel_Interaction
+
+# Fit the model across all 3 quantiles
+model <- rq(reg_equation, data = df, tau = quantiles) 
+
+# Summarize results with bootstrapped standard errors
+summary(model, se = "boot")
+```
+
+##### Model 2: Reduced model with key predictors + categorical Main Effects
+
+This model drops some weaker predictors to improve interpretability and avoid overfitting. We've now included categorical variables (*Neighborhood*, *MSZoning*, etc.) to capture location and zoning effects.
+
+$$
+\begin{align*}
+\text{Sale Price}_{\tau}= \ & \beta_0 + \beta_1 \text{LotFrontage} + \beta_2 \text{OverallQual} + \beta_3 \text{YearBuilt} + \beta_4 \text{YearRemodAdd} \\
+& + \beta_5 \text{X1stFlrSF} + \beta_6 \text{FullBath} + \beta_7 \text{KitchenAbvGr} + \beta_8 \text{Fireplaces} \\
+& + \beta_9 \text{GarageArea} + \beta_{10} \text{WoodDeckSF} + \beta_{11} \text{OpenPorchSF} \\
+& + \gamma_1 \text{Flr_Interaction} + \gamma_2 \text{Remodel_Interaction} \\
+& + \delta_1 \text{MSSubClass} + \delta_2 \text{Neighborhood} + \delta_3 \text{MSZoning} + \delta_4 \text{HouseStyle} + \epsilon_{\tau}
+\end{align*}
+$$
+
+```{r, Warning=FALSE}
+reg_equation <- SalePrice ~ 
+  # Main effects 
+  LotFrontage + OverallQual + YearBuilt + YearRemodAdd +
+  X1stFlrSF + FullBath + KitchenAbvGr + Fireplaces + 
+  GarageArea + WoodDeckSF + OpenPorchSF +
+  
+  # Numeric interactions
+  Flr_Interaction + Remodel_Interaction +
+  
+  # Categorical main effects 
+  MSSubClass + Neighborhood + MSZoning + HouseStyle 
+
+model <- rq(reg_equation, data = df, tau = quantiles)
+# Throws warning messages for factor variables, but works
+
+# Bootstrapped results
+summary(model, se = "boot")
+```
+
+##### Model 3: Reduction + modification + neighborhood categorical variable
+
+This model focuses on the strongest numeric predictors and *Neighborhood* as the key categorical variable. The model is cleaner and may generalize better. *Age* and *YearSinceRemodel* add relevant info to complement physical features
+
+$$
+\begin{align*}
+\text{Sale Price}_{\tau} =\ & \beta_0 + \beta_1 \text{LotFrontage} + \beta_2 \text{OverallQual} + \beta_3 \text{X1stFlrSF} \\
+& + \beta_4 \text{KitchenAbvGr} + \beta_5 \text{Fireplaces} + \beta_6 \text{GarageArea} \\
+& + \beta_7 \text{WoodDeckSF} + \beta_8 \text{OpenPorchSF} + \beta_9 \text{Age} + \beta_{10} \text{YearsSinceRemodel} \\
+& + \gamma_1 \text{Flr_Interaction} + \delta_1 \text{Neighborhood} + \epsilon_{\tau}
+\end{align*}
+$$
+
+```{r, Warning=FALSE}
+reg_equation <- SalePrice ~ 
+  # Strongest + new numeric predictors
+  LotFrontage + OverallQual + X1stFlrSF + 
+  KitchenAbvGr + Fireplaces + 
+  GarageArea + WoodDeckSF + OpenPorchSF +
+  Age + YearsSinceRemodel + 
+  
+  # Strongest numeric interaction
+  Flr_Interaction + 
+  
+  # Strongest categorical main effect
+  Neighborhood
+
+model <- rq(reg_equation, data = df, tau = quantiles)
+# Throws warning messages for factor variable, but works
+
+# Bootstrapped results
+summary(model, se = "boot")
+```
+
+##### Model 4 - Adding categorical interaction terms
+
+This model adds interaction between cluster and housestyle, which lets us explore whether the impact of style differs by neighborhood type. This model uses *NeighborhoodCluster1* and *HouseStyleCollapsed1Story* as the baseline levels.
+
+$$
+\begin{align*}
+\text{Sale Price}_{\tau} =\ & \beta_0 + \beta_1 \text{LotFrontage} + \beta_2 \text{OverallQual} + \beta_3 \text{X1stFlrSF} \\
+& + \beta_4 \text{KitchenAbvGr} + \beta_5 \text{Fireplaces} + \beta_6 \text{GarageArea} \\
+& + \beta_7 \text{WoodDeckSF} + \beta_8 \text{OpenPorchSF} + \beta_9 \text{Age} + \beta_{10} \text{YearsSinceRemodel} \\
+& + \gamma_1 \text{Flr_Interaction} \\
+& + \delta_1 (\text{NeighborhoodCluster} * \text{HouseStyleCollapsed}) + \epsilon_{\tau}
+\end{align*}
+$$
+
+```{r, Warning=FALSE}
+reg_equation <- SalePrice ~ 
+  # Strongest numeric predictors
+  LotFrontage + OverallQual + X1stFlrSF + 
+  KitchenAbvGr + Fireplaces + 
+  GarageArea + WoodDeckSF + OpenPorchSF +
+  Age + YearsSinceRemodel + 
+  
+  # Strongest numeric interaction
+  Flr_Interaction + 
+  
+  # New categorical interaction
+  NeighborhoodCluster*HouseStyleCollapsed
+
+model <- rq(reg_equation, data = df, tau = quantiles)
+
+# Bootstrapped results
+summary(model, se = "boot")
+```
+
+##### Model 5 - Adding categorical terms as main effects (No Interaction)
+
+This model compares directly with model 4, but removes interaction. Thus, helps to assess whether neighborhood cluster and homestyle add value by themselves.
+
+$$
+\begin{align*}
+\text{Sale Price}_{\tau} =\ & \beta_0 + \beta_1 \text{LotFrontage} + \beta_2 \text{OverallQual} + \beta_3 \text{X1stFlrSF} \\
+& + \beta_4 \text{KitchenAbvGr} + \beta_5 \text{Fireplaces} + \beta_6 \text{GarageArea} \\
+& + \beta_7 \text{WoodDeckSF} + \beta_8 \text{OpenPorchSF} + \beta_9 \text{Age} + \beta_{10} \text{YearsSinceRemodel} \\
+& + \gamma_1 \text{Flr_Interaction} \\
+& + \delta_1 \text{NeighborhoodCluster} + \delta_2 \text{HouseStyleCollapsed} + \epsilon_{\tau}
+\end{align*}
+$$
+
+```{r, Warning=FALSE}
+reg_equation <- SalePrice ~ 
+  # Strongest numeric predictors
+  LotFrontage + OverallQual + X1stFlrSF + 
+  KitchenAbvGr + Fireplaces + 
+  GarageArea + WoodDeckSF + OpenPorchSF +
+  Age + YearsSinceRemodel + 
+  
+  # Strongest numeric interaction
+  Flr_Interaction + 
+  
+  # Categorical variables as main effects
+  NeighborhoodCluster + HouseStyleCollapsed
+
+model <- rq(reg_equation, data = df, tau = quantiles)
+
+# Bootstrapped results
+summary(model, se = "boot")
+```
+
+##### Model 6: Categorical Variables (No Baseline Levels)
+
+$$
+\begin{align*}
+\text{Sale Price}_{\tau}= \ & \beta_0 + \beta_1 \text{LotFrontage} + \beta_2 \text{OverallQual} + \beta_3 \text{X1stFlrSf} + \beta_4 \text{KitchenAbvGr} \\
+& + \beta_5 \text{Fireplaces} + \beta_6 \text{GarageArea} + \beta_7 \text{WoodDeck} + \beta_8 \text{OpenPorchSF} \\
+& + \beta_9 \text{Age} + \beta_{10} \text{YearSinceRemodel} + \gamma_1 \text{FlrInteraction} \\
+& + \delta_1 \text{NeighborhoodCluster} + \delta_2 \text{HouseStyleCollapsed} \\
+& + \delta_3 (\text{NeighborhoodCluster} * \text{HouseStyleCollapsed}) + \epsilon_{\tau}
+\end{align*}
+$$
+
+Building a model without any baseline group (every level of the categorical variables is represented) The interactions between *NeighborhoodCluster* and *HouseStyleCollapsed* are manually constructed which gives us full flexibility in how these categories influence the outcome.
+
+```{r}
+# Select variables used in model 
+categorical_vars <- c("NeighborhoodCluster", "HouseStyleCollapsed")
+numeric_vars <- c(
+  "LotFrontage", "OverallQual", "X1stFlrSF", 
+  "KitchenAbvGr", "Fireplaces", 
+  "GarageArea", "WoodDeckSF", "OpenPorchSF", 
+  "Age", "YearsSinceRemodel", 
+  "Flr_Interaction")
+
+# Build numeric matrix
+X_numeric <- df[, numeric_vars]
+
+# Create the dummy matrices
+dummies_1 <- model.matrix(~ NeighborhoodCluster - 1, data = df)
+dummies_2 <- model.matrix(~ HouseStyleCollapsed - 1, data = df)
+
+# Create interaction terms
+interaction_terms <- as.data.frame(matrix(nrow = nrow(df), ncol = 0))
+for (i in colnames(dummies_1)) {
+  for (j in colnames(dummies_2)) {
+    interaction_name <- paste(i, j, sep = ":")
+    interaction_terms[[interaction_name]] <- dummies_1[, i] * dummies_2[, j]
+  }
+}
+
+# Combine all predictors 
+X <- cbind(X_numeric, interaction_terms)
+
+# Create matrix of predictors (with all dummy variables, no dropped levels)
+X_matrix <- as.matrix(X)
+y_vector <- df$SalePrice
+```
+
+**Model 6: Numeric main effects + numeric interaction + categorical interactions**
+
+```{r}
+# Fit separate model for each quantile 
+quantiles <- c(0.25, 0.5, 0.75)
+
+models <- lapply(quantiles, function(tau_val) {
+  rq(y_vector ~ X_matrix - 1, tau = tau_val)
+})
+
+# Bootstrapped results
+lapply(models, function(model) summary(model, se = "boot"))
+```
+
+### Empirical Results {.tabset}
+
+w ![Table 2. Results for Quantile Regression (Model 6) at τ = 0.25](images/clipboard-2516918500.png)
+
+![Table 3. Results for Quantile Regression (Model 6) at τ = 0.50](images/clipboard-1310700120.png)
+
+![Table 4. Results for Quantile Regression (Model 6) at τ = 0.75](images/clipboard-3870831625.png)
+
+\*\*Key Takeaways:\*\*
+
+-   OverallQual is highly statistically significant and has a positive effect on sales price across all three quantiles.
+
+    -   This demonstrates that higher overall quality equals higher sale price
+
+-   X1stFlrInteraction also maintains a positive effect on sales price with values of 49.6187 (25th quantile), 61.5059 (50th quantile), and 77.5810 (75th quantile).
+
+    -   The impact of this variable increases as the price of the home increases.
+
+-   Fireplaces has a higher positive effect in the 25th and 75th quantiles, with a greater effect in the 75th quantile than the 25th.
+
+    -   Having multiple fireplaces is a luxury and thus will have a greater effect on higher-priced homes. Age, KitchenAbvGr, and YearsSinceRemodel consistently have a negative effect on sale price.
+
+-   Age, KitchenAbvGr, and YearsSinceRemodel consistently have a negative effect on sale price.
+
+    -   Older homes are less desirable due to need for repairs, lack of amenities, and unfavorable layouts.
+
+    -   The nature and timing of remodeling work can have a negative effect on sale prices if buyers don’t see an increase in value from the work or their preferences have changed.
+
+    -   Negative effects of KitchenAbvGr could be due to older home with additional kitchens that are not seen as necessary to buyers.
+
+-   A correlation matrix of numeric predictors showed weak multicollinearity between KitchenAbvGr and other numeric variables.
+
+    -   Interactions between neighborhood and house style have a greater positive effect on sale price in the 50^th^ and 25^th^ quantiles, but in the 75^th^ quantile, these interactions are statistically insignificant and potentially unfavorable for sales price.
+
+    -   Suggesting that other factors drive the price of high-end homes, such as those related to luxury and uniqueness. 2-story homes have a lesser and sometimes negative effect on price when compared to the 25^th^ and 50^th^ quantile because it is a buyer expectation for higher-priced homes and therefore is does not greatly impact value.
+
+### Conclusions & Business Implications {.tabset}
+
+**Conclusion**
+
+This study applies quantile regression as a method to model housing prices using a set of selected predictor variables, with a focus on size-related variables.
+
+After considerable data cleaning and the creation of interaction terms and clustering neighborhoods based on neighborhood quality data - the analysis explored how several features influence different points in the housing price distribution.
+
+Six different quantile regression models were created, each one with different structures and complexity.
+
+We also included interaction effects for both numerical and categorical variables to represent more fully developed relationships among variables. The final model reveals that predictor variables like overall quality of the house, floor area, and garage size are all price determinants consistently across all price quantiles.
+
+**Business Implications**
+
+From a business perspective, our quantile regression model suggests that different predictors are more relevant at different price levels. For instance, higher-end buyers tend to value features such as deck size and updated models when compared to lower-end buyers.
+
+Additionally, the interaction between the NeighborhoodCluster and the HouseStyle variable (indicating 1-story, 2-story, split level, etc.) reveals a significant relationship between these two variables. Not all house styles have the same impact in each neighborhood.
+
+In higher-priced neighborhoods, the 2-story attribute does not dramatically increase the value, suggesting that it is a buyer expectation and therefore does not justify a higher price. However, in more affordable neighborhoods, a 2-story attribute appears to have a stronger impact on the value. This interaction highlights the importance of paying close attention to which features contribute the most value to homes based on which neighborhoods they’re located in.
+
+Builders, house flippers, and designers can leverage this information to help improve marketing strategies or product offerings when working with consumer segments across the different quantiles. According to these results, real estate developers and home builders should prioritize modern upgrades – such as larger decks – when selling to higher-end buyers. Meanwhile, sellers looking to work in more conservatively priced neighborhoods should focus on house structure and design. This approach takes buyer expectations into consideration while optimizing spending. Some possible limitations of this model include multicollinearity, which are common when employing a quantile regression model with predictors that are highly correlated with many interaction terms. In this case, multicollinearity can make it more difficult to compare results across different quantiles; and adding interaction terms only amplifies the issue. For real estate agents and developers, this can make it more difficult to determine the individual impact of each specific variable, making it harder to use the results to prioritize certain design choices. As a result, developers may struggle with decision-making when it comes to which features are appropriate to prioritize based on the price segment they are working on.
+
+### References
+
+Ebru, C., & Eban, A. (2011). Determinants of house prices in Istanbul: A quantile regression approach. QualQuant, 45(2), 305–317.
+
+Kang, H. H., & Liu, S.-B. (2014). The impact of the 2008 financial crisis on housing prices in China and Taiwan: A quantile regression analysis. Economic Modelling, 42, 356–362.
+
+Kim, H., Park, S. W., Lee, S., & Xue, X. (2015). Determinants of house prices in Seoul: A quantile regression approach. Pacific Rim Property Research Journal, 21(2), 91–113.
+
+Koenker, R., & Bassett Jr., G. (1978, January). Regression Quantiles, Econometrica, 46(1), 33–50. Lee, B. S., Chung, E.-C., & Kim, Y. H. (2005). Dwelling age, redevelopment, and housing prices: The case of apartment complexes in Seoul. Journal of Real Estate Finance and Eco-nomics, 30(1), 55–80.
