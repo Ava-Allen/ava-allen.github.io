@@ -1,0 +1,482 @@
+---
+title: "BUS461 - Independent Project Final"
+author: "Ava Allen"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_download: TRUE
+    toc: TRUE
+    toc_float: TRUE
+---
+
+The Spotify dataset:
+
+https://www.kaggle.com/datasets/amitanshjoshi/spotify-1million-tracks/data
+
+
+# Data Preprocessing
+
+Loading necessary packages
+```{r setup, results = "hide", message = FALSE, warning=FALSE}
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(ranger)
+library(xgboost)
+library(Matrix)
+library(pROC)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+```
+
+Loading & Preparing the dataset
+```{r}
+set.seed(123)
+df <- read.csv("spotify_data.csv")
+
+df <- df %>% select (-c(track_name, artist_name, X, track_id))
+df$year <- as.factor(df$year)
+```
+Deleting the columns track name, artist name, track id, and X as they will not be used in our model and converting the variable "year" into a categorical variable.
+
+Defining "high potential" songs 
+```{r}
+threshold_25 <- quantile(df$popularity, 0.75) # top 25%
+threshold_30 <- quantile(df$popularity, 0.70) # top 30%
+
+df <- df %>%
+  mutate(high_potential_25 = ifelse(popularity >= threshold_25, 1, 0),
+         high_potential_30 = ifelse(popularity >= threshold_30, 1, 0))
+```
+Creating binary outcome variables to tell us whether songs fall into the top 25% or top 30% of popularity (measured from 0-100).
+
+Selecting our predictors/creating target variables
+```{r}
+# select predictors (drop popularity and thresholds)
+features <- df %>% select(-popularity, -high_potential_25, -high_potential_30)
+
+# create target variables
+target_25 <- df$high_potential_25
+target_30 <- df$high_potential_30
+```
+
+Splitting the data into test & train sets (60/40)
+```{r}
+train_index <- createDataPartition(target_25, p = 0.6, list = FALSE)
+
+x_train <- features[train_index, ]
+x_test <- features[-train_index, ]
+y_train_25 <- target_25[train_index]
+y_test_25 <- target_25[-train_index]
+y_train_30 <- target_30[train_index] 
+y_test_30 <- target_30[-train_index]
+
+# the 30% sets use the train index from the 25% partition
+# the dataset is very large and the threshold change is small, so this won't impact performance  
+# more important to use the same split for model cross-comparison
+```
+The 30% set uses the training index from the 25% partition. The dataset is large and the threshold is small, this won't impact performance. It's more important to use the same split for model cross-comparison.
+
+# Random Forest Modeling
+
+## Random Forest Model Set 1
+All numeric variables + year as a factor + genre unfactored
+
+Creating a function to run random forest models with the "ranger" package which is optimized for speed and efficiency in large datasets (vector memory limit hit otherwise)
+```{r}
+ranger_model <- function(x_train, y_train, x_test, y_test, label, ntree = 100) {
+  # build training dataframe
+  train_df <- data.frame(x_train, target = y_train)
+  
+  # fit the ranger model
+  set.seed(123)
+  model <- ranger(
+    dependent.variable.name = "target",
+    data = train_df,
+    num.trees = ntree,
+    importance = "impurity",
+    probability = TRUE)
+  
+  # in-sample predictions + AUC
+  train_preds <- model$predictions[, 2]
+  auc_train <- auc(y_train, train_preds)
+  
+  # out-of-sample predictions + AUC
+  test_preds <- predict(model, data = x_test)$predictions[, 2]
+  auc_test <- auc(y_test, test_preds)
+  
+  # print results
+  cat("\n", label, "\n")
+  cat("   In-Sample AUC: ", round(auc_train, 4), "\n")
+  cat("   Out-of-Sample AUC: ", round(auc_test, 4), "\n")
+  
+  # return model and AUCs
+  return(list(model = model, auc_train = auc_train, auc_test = auc_test))
+}
+
+# AUC convergence function
+auc_by_trees <- function(x_train, y_train, label, tree_seq = seq(100, 800, 100)) {
+  train_df <- data.frame(x_train, target = y_train)
+  auc_results <- tibble(num_trees = tree_seq, auc = NA_real_)
+  # train ranger models
+  for (i in seq_along(tree_seq)) {
+    set.seed(123)
+    model <- ranger(
+      dependent.variable.name = "target",
+      data = train_df,
+      num.trees = tree_seq[i],
+      probability = TRUE
+    )
+    preds <- model$predictions[, 2]
+    auc_results$auc[i] <- auc(y_train, preds)
+  }
+  # plot AUC vs number of trees
+  ggplot(auc_results, aes(x = num_trees, y = auc)) +
+    geom_line(color = "steelblue") +
+    geom_point(size = 2) +
+    labs(
+      title = paste("Convergence Curve -", label),
+      x = "Number of Trees",
+      y = "OOB AUC"
+    ) +
+    theme_minimal(base_size = 10)
+}
+
+auc_by_trees(x_train, y_train_25, label = "Top 25%")
+auc_by_trees(x_train, y_train_30, label = "Top 30%")
+```
+The AUC converges at ~500 trees for both models. There are diminishing returns when we go over 500 trees.
+
+Running the first set of RF models
+```{r}
+# run first set of ranger models
+rf1_25_500 <- ranger_model(x_train, y_train_25, x_test, y_test_25, "Top 25% - 500 Trees", ntree = 500)
+rf1_30_500 <- ranger_model(x_train, y_train_30, x_test, y_test_30, "Top 30% - 500 Trees", ntree = 500)
+```
+
+## RF Models Set 1: Model Performances & Feature Comparisons
+```{r}
+# model cross-comparison
+# extract in and out-of-sample AUCs from both models
+rf1_performance <- tibble(
+  Model = c("RF1 25% - 500", "RF1 30% - 500"),
+  In_Sample = c(rf1_25_500$auc_train, rf1_30_500$auc_train),
+  Out_of_Sample = c(rf1_25_500$auc_test, rf1_30_500$auc_test))
+
+rf1_performance
+
+# compare feature importance across models
+# create function to get importance from each ranger model
+ranger_importance <- function(model_obj, model_label) {
+  importance <- model_obj$variable.importance
+  tibble(
+    Feature = names(importance),
+    Importance = as.numeric(importance),
+    Model = model_label)
+}
+
+# extract variable importance from both models
+rf1_imp_25 <- ranger_importance(rf1_25_500$model, "Top 25% - 500 Trees")
+rf1_imp_30 <- ranger_importance(rf1_30_500$model, "Top 30% - 500 Trees")
+
+# combine into one data frame
+rf1_importance <- bind_rows(rf1_imp_25, rf1_imp_30)
+
+# compare top 15 features
+rf1_top_features <- rf1_importance %>%
+  group_by(Model) %>%
+  slice_max(Importance, n = 15) %>%
+  ungroup() %>%
+  distinct(Feature) %>%
+  pull()
+
+rf1_top_importance <- rf1_importance %>% filter(Feature %in% rf1_top_features)
+
+# plot feature importance 
+ggplot(rf1_top_importance, aes(x = reorder(Feature, Importance), y = Importance, fill = Model)) +
+  geom_col(show.legend = FALSE, width = 0.8) +
+  coord_flip() +
+  facet_wrap(~ Model, scales = "free_y") +
+  labs(title = "Top Feature Importances",
+       x = "Feature", y = "Gini Importance") +
+  theme_minimal(base_size = 8) +
+  theme(strip.text = element_text(size = 10),
+        axis.text.y = element_text(size = 7))
+```
+## Random Forest Models Set 2
+All numeric variables + genre and year as factor variables
+```{r}
+# prepare factor variables (genre + year)
+# calculate genre frequencies
+genre_counts <- x_train %>% count(genre)
+# 82 unique genres with different frequencies
+# we have to cut this down - too many factors for the model; overfitting issues
+
+# keep genres that are frequent in the data
+rare_threshold <- 0.01 * nrow(x_train)
+common_genres <- genre_counts %>% filter(n >= rare_threshold) %>% pull(genre)
+# condensed down to 58 genres
+
+# replace rare genres with "Other"
+# add factored year 
+# apply to training and test sets
+x_train2 <- x_train %>% mutate(
+  genre = ifelse(genre %in% common_genres, genre, "Other"),
+  genre = as.factor(genre),
+  year = as.factor(year))
+
+x_test2 <- x_test %>% mutate(
+  genre = ifelse(genre %in% common_genres, genre, "Other"),
+  genre = as.factor(genre),
+  year = as.factor(year))
+
+# tree convergence
+auc_by_trees(x_train2, y_train_25, label = "Top 25% - Factored Genre/Year")
+auc_by_trees(x_train2, y_train_30, label = "Top 30% - Factored Genre/Year")
+# the AUC converges at ~500 trees for both models
+
+# run second set of ranger models 
+# using the same rf function as previous models
+rf2_25_500 <- ranger_model(x_train2, y_train_25, x_test2, y_test_25, "Top 25% - 500 Trees", ntree = 500)
+rf2_30_500 <- ranger_model(x_train2, y_train_30, x_test2, y_test_30, "Top 30% - 500 Trees", ntree = 500)
+```
+
+## RF Models Set 2: Model Performances & Feature Comparisons
+```{r}
+# get model performance 
+rf2_performance <- tibble(
+  Model = c("RF2 25% - 500", "RF2 30% - 500"),
+  In_Sample_AUC = c(rf2_25_500$auc_train, rf2_30_500$auc_train),
+  Out_of_Sample_AUC = c(rf2_25_500$auc_test, rf2_30_500$auc_test))
+
+rf2_performance
+
+# compare feature importance across models
+rf2_imp_25 <- ranger_importance(rf2_25_500$model, "Top 25% - 500 Trees")
+rf2_imp_30 <- ranger_importance(rf2_30_500$model, "Top 30% - 500 Trees")
+
+# combine into one data frame
+rf2_importance <- bind_rows(rf2_imp_25, rf2_imp_30)
+
+# compare top 15 features
+rf2_top_features <- rf2_importance %>%
+  group_by(Model) %>%
+  slice_max(Importance, n = 15) %>%
+  ungroup() %>%
+  distinct(Feature) %>%
+  pull()
+
+rf2_top_importance <- rf2_importance %>% filter(Feature %in% rf2_top_features)
+
+# plot feature importance 
+ggplot(rf2_top_importance, aes(x = reorder(Feature, Importance), y = Importance, fill = Model)) +
+  geom_col(show.legend = FALSE, width = 0.8) +
+  coord_flip() +
+  facet_wrap(~ Model, scales = "free_y") +
+  labs(title = "Top Feature Importances",
+       x = "Feature", y = "Gini Importance") +
+  theme_minimal(base_size = 8) +
+  theme(strip.text = element_text(size = 10),
+        axis.text.y = element_text(size = 7))
+```
+
+# Comparing All Random Forest Models
+
+## Performance
+```{r}
+rf_performance <- tibble(
+  Model = c("RF1 25% - 500", "RF1 30% - 500", "RF2 25% - 500", "RF2 30% - 500"),
+  In_Sample_AUC = c(rf1_25_500$auc_train, rf1_30_500$auc_train, rf2_25_500$auc_train, rf2_30_500$auc_train),
+  Out_of_Sample_AUC = c(rf1_25_500$auc_test, rf1_30_500$auc_test, rf2_25_500$auc_test, rf2_30_500$auc_test))
+
+rf_performance
+```
+
+## Feature Importance
+```{r}
+# combine and filter top features
+rf_all_importance <- bind_rows(rf1_importance, rf2_importance)
+
+rf_top_features <- rf_all_importance %>%
+  group_by(Model) %>%
+  slice_max(Importance, n = 15) %>%
+  ungroup() %>%
+  distinct(Feature) %>%
+  pull()
+
+rf_top_importance <- rf_all_importance %>% filter(Feature %in% rf_top_features)
+
+# plot feature importance
+ggplot(rf_top_importance, aes(x = reorder(Feature, Importance), y = Importance, fill = Model)) +
+  geom_col(show.legend = FALSE, width = 0.8) +
+  coord_flip() +
+  facet_wrap(~ Model, scales = "free_y") +
+  labs(title = "Top Feature Importances (Genre and Year as Factors)",
+       x = "Feature", y = "Gini Importance") +
+  theme_minimal(base_size = 8) +
+  theme(strip.text = element_text(size = 10),
+        axis.text.y = element_text(size = 7))
+```
+
+# XGBoost Modeling
+
+## XGBoost Model 1
+All numeric variables + year as a factor variable (excluding genre)
+
+First we need to prep the data since the XGBoost model requires numerical matrices (all data is numeric except genre)
+```{r}
+# convert year to dummy variables (one-hot encoding)
+x_train$year <- as.factor(x_train$year)
+x_test$year <- as.factor(x_test$year)
+
+train_year_encoded <- model.matrix(~ year - 1, data = x_train)
+test_year_encoded <- model.matrix(~ year - 1, data = x_test)
+
+# remove genre and year from data, then add back encoded year
+xgb1_train <- x_train %>% select(-genre, -year)
+xgb1_test  <- x_test %>% select(-genre, -year)
+
+xgb1_train <- cbind(xgb1_train, train_year_encoded)
+xgb1_test  <- cbind(xgb1_test, test_year_encoded)
+
+# create model matrices
+mtrain_xgb1 <- xgb.DMatrix(data = as.matrix(xgb1_train), label = y_train_25)
+mtest_xgb1 <- xgb.DMatrix(data = as.matrix(xgb1_test), label = y_test_25)
+
+# train the model
+set.seed(123)
+xgb_params <- list(
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  max_depth = 6,
+  eta = 0.1)
+
+xgb_model1 <- xgb.train(params = xgb_params, 
+                        data = mtrain_xgb1, 
+                        nrounds = 100,
+                        watchlist = list(val = mtest_xgb1), 
+                        early_stopping_rounds = 10, 
+                        verbose = 0)
+
+# make predictions and get AUC's
+pred_train1 <- predict(xgb_model1, mtrain_xgb1)
+pred_test1 <- predict(xgb_model1, mtest_xgb1)
+xgb_auc_train1 <- auc(y_train_25, pred_train1)
+xgb_auc_test1 <- auc(y_test_25, pred_test1)
+
+cat("XGBoost Model 1 (Year as Categorical, Genre Removed)\n",
+    "In-Sample AUC:", xgb_auc_train1,
+    "\nOut-of-Sample AUC:", xgb_auc_test1, "\n")
+```
+
+## XGBoost Model 2
+All numeric variables + year and genre as factors
+```{r}
+# reset train and test sets 
+# reusing genre factoring logic from second RF model set
+x_train$genre <- ifelse(x_train$genre %in% common_genres, x_train$genre, "Other")
+x_test$genre <- ifelse(x_test$genre %in% common_genres, x_test$genre, "Other")
+x_train$genre <- as.factor(x_train$genre)
+x_test$genre <- as.factor(x_test$genre)
+
+# one-hot encode genre for the model
+train_genre_encoded <- model.matrix(~ genre - 1, data = x_train)
+test_genre_encoded <- model.matrix(~ genre - 1, data = x_test)
+
+# add encoded variables to train + test sets
+# reusing year encoding from second RF model set
+xgb2_train <- x_train %>% select(-genre, -year)
+xgb2_test  <- x_test %>% select(-genre, -year)
+
+xgb2_train <- cbind(xgb2_train, train_genre_encoded, train_year_encoded)
+xgb2_test  <- cbind(xgb2_test, test_genre_encoded, test_year_encoded)
+
+# create model matrices
+mtrain_xgb2 <- xgb.DMatrix(data = as.matrix(xgb2_train), label = y_train_25)
+mtest_xgb2 <- xgb.DMatrix(data = as.matrix(xgb2_test), label = y_test_25)
+
+# train the model
+set.seed(123)
+xgb_model2 <- xgb.train(params = xgb_params, 
+                        data = mtrain_xgb2, 
+                        nrounds = 100,
+                        watchlist = list(val = mtest_xgb2), 
+                        early_stopping_rounds = 10, 
+                        verbose = 0)
+
+# make predictions and get AUC's
+pred_train2 <- predict(xgb_model2, mtrain_xgb2)
+pred_test2 <- predict(xgb_model2, mtest_xgb2)
+xgb_auc_train2 <- auc(y_train_25, pred_train2)
+xgb_auc_test2 <- auc(y_test_25, pred_test2)
+
+cat("XGBoost Model 2 (Year and Genre as Factor Variables)\n",
+    "Train AUC:", xgb_auc_train2, 
+    "\nTest AUC:", xgb_auc_test2, "\n")
+
+
+## performance comparison between models
+xgb_performance <- tibble(
+  Model = c("XGBoost 1 (No Genre)", "XGBoost 2 (Factored Genre)"),
+  In_Sample_AUC = c(xgb_auc_train1, xgb_auc_train2),
+  Out_of_Sample_AUC = c(xgb_auc_test1, xgb_auc_test2))
+
+xgb_performance
+
+# feature importance comparison
+imp_xgb1 <- xgb.importance(model = xgb_model1) %>% mutate(Model = "Model 1 (No Genre)")
+imp_xgb2 <- xgb.importance(model = xgb_model2) %>% mutate(Model = "Model 2 (Factored Genre)")
+
+# combine into one df + select top 15 features per model
+xgb_all_importance <- bind_rows(imp_xgb1, imp_xgb2)
+xgb_top_features <- xgb_all_importance %>% group_by(Model) %>% slice_max(Gain, n = 15)
+
+# plot feature importance
+ggplot(xgb_top_features, aes(x = reorder(Feature, Gain), y = Gain, fill = Model)) +
+  geom_col(show.legend = FALSE, width = 0.8) +
+  coord_flip() +
+  facet_wrap(~ Model, scales = "free_y") +
+  labs(title = "Top Feature Importances", 
+       x = "Feature", y = "Gain (Importance)") +
+  theme_minimal(base_size = 10) +
+  theme(strip.text = element_text(size = 10), 
+        axis.text.y = element_text(size = 8))
+```
+
+## XGBoost Models 1 & 2: Performance & Feature Comparison
+```{r}
+xgb_perf <- tibble(
+  Model = c("XGBoost 1 (No Genre)", "XGBoost 2 (Factored Genre)"),
+  In_Sample_AUC = c(xgb_auc_train1, xgb_auc_train2),
+  Out_of_Sample_AUC = c(xgb_auc_test1, xgb_auc_test2))
+
+xgb_perf
+
+# feature importance comparison
+# get feature importance from both models
+imp_xgb1 <- xgb.importance(model = xgb_model1) %>% mutate(Model = "Model 1 (No Genre)")
+imp_xgb2 <- xgb.importance(model = xgb_model2) %>% mutate(Model = "Model 2 (Factored Genre)")
+
+# combine into one df + select top 15 features per model
+all_importance <- bind_rows(imp_xgb1, imp_xgb2)
+top_features <- all_importance %>% group_by(Model) %>% slice_max(Gain, n = 15)
+
+# plot feature importance
+ggplot(top_features, aes(x = reorder(Feature, Gain), y = Gain, fill = Model)) +
+  geom_col(show.legend = FALSE, width = 0.8) +
+  coord_flip() +
+  facet_wrap(~ Model, scales = "free_y") +
+  labs(title = "Top Feature Importances", 
+       x = "Feature", y = "Gain (Importance)") +
+  theme_minimal(base_size = 10) +
+  theme(strip.text = element_text(size = 10), 
+        axis.text.y = element_text(size = 8))
+```
+
+
+
+
+
+
+
